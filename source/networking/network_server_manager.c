@@ -4772,7 +4772,9 @@ static void network_game_server_port_bots(
 	 * replaces the companion, without changing multiplayer bot behavior. */
 	if (campaign_companion && human_count == 1)
 		wanted = 1;
-	if (human_team == NONE)
+	/* Campaign co-op is not a team game: its human player can have
+	 * team_index == NONE. Do not suppress the companion in that case. */
+	if (human_team == NONE && !campaign_companion)
 		wanted = 0;
 
 	/* those not wanted leave (the last first) */
@@ -4798,7 +4800,7 @@ static void network_game_server_port_bots(
 		long team_index;
 
 		if (campaign_companion)
-			team_index = human_team;
+			team_index = human_team != NONE ? human_team : 0;
 		else if (bots_teams() == _bots_teams_against)
 			team_index = human_team == 0 ? 1 : 0;
 		else
@@ -4815,7 +4817,12 @@ static void network_game_server_port_bots(
 			get_unique_random_color(server, &joining);
 			joining.player_list_index = NONE;
 			if (!network_game_add_player(&server->game, &joining))
+			{
+				network_event("bots: could not add %s to lobby (players %d/%d, team %ld, machine %d)",
+					campaign_companion ? "campaign companion" : "bot", server->game.player_count,
+					server->game.maximum_players, team_index, joining.machine_index);
 				break;
+			}
 			network_event("bots: bot %ld joined the lobby (team %ld)", bot_index + 1, team_index);
 			changed = TRUE;
 		}
