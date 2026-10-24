@@ -228,6 +228,10 @@ and left, the defenders' posts. The map's teleporters are logged once.
 const char *config_string(char const *name);
 long config_integer(char const *name);
 void platform_log(char const *format, ...);
+/* Campaign's vehicle seating functions are implemented in units.c. */
+void unit_scripting_enter_vehicle(long unit_index, long vehicle_index, char const *seat_name);
+short vehicle_scripting_find_available_seats(long vehicle_index, char const *seat_substring_name,
+	short seat_desire_type, short *seat_indices, short maximum_seat_count);
 unsigned long long vita_host_time_us(void);
 #ifdef HALO_VITA
 int vita_host_fourth_core_join(const char *role, int level);
