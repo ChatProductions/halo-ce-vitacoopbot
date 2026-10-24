@@ -4114,6 +4114,8 @@ static boolean bots_campaign_scavenge(struct bots_bot *bot, struct unit_datum *u
 			{
 				bots_set_goal(bot, _bots_goal_item, &ground, surface);
 				bot->item_index = item_index;
+				platform_log("companion: going for dropped weapon %ld, %.1f units away",
+					item_index, (double)bots_distance3d(position, &object_get(item_index)->object.position));
 				return TRUE;
 			}
 		}
@@ -6902,6 +6904,7 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 	struct object_datum *target;
 	long leader, leader_vehicle = NONE, own_vehicle, now = game_time_get();
 	boolean gunner = FALSE;
+	boolean melee_pursuit = FALSE;
 	real distance = 0.f;
 
 	csmemset(&tick, 0, sizeof(tick));
@@ -7036,7 +7039,7 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 		}
 		/* Use the same melee control as multiplayer bots. This is a
 		campaign actor, so bots_bot_fight() cannot be called here. */
-		if (own_vehicle == NONE && distance < 1.1f &&
+		if (own_vehicle == NONE && distance < 1.45f &&
 			yaw_off < 0.6f && now >= bot->melee_tick)
 		{
 			tick.flags &= ~FLAG(_unit_control_weapon_primary_trigger_bit);
@@ -7076,13 +7079,28 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 				goal = item->object.position;
 			bots_search_take(bot, TRUE);
 		}
+		/* With no ammunition and no reachable dropped weapon, fight at
+		melee range rather than tracking enemies from beside the player.
+		The target and companion must both stay close to the human. */
+		else if (leader_vehicle == NONE && !bots_campaign_has_ammo(tick.unit) &&
+			target && bot->target_unit_index != NONE &&
+			!TEST_FLAG(target->object.damage_flags, _object_dead_bit) &&
+			now - bot->target_seen_tick < TICKS_PER_SECOND / 2 &&
+			bots_distance2d(&human->object.position, &target->object.position) < 6.f &&
+			bots_distance2d(&tick.position, &human->object.position) < 7.f)
+		{
+			goal = target->object.position;
+			melee_pursuit = TRUE;
+		}
 		distance = bots_distance2d(&tick.position, &goal);
-		if (distance > (scavenging ? 0.45f : (leader_vehicle != NONE ? 2.8f : 2.5f)))
+		if (distance > (scavenging ? 0.45f : (melee_pursuit ? 0.85f :
+			(leader_vehicle != NONE ? 2.8f : 2.5f))))
 		{
 			if (!scavenging)
 			{
 				real_point3d ground;
-				long surface = bots_unit_surface(leader_vehicle != NONE ? leader_vehicle : leader, &ground);
+				long surface = bots_unit_surface(melee_pursuit ? bot->target_unit_index :
+					(leader_vehicle != NONE ? leader_vehicle : leader), &ground);
 
 				if (surface != NONE)
 				{
@@ -7149,14 +7167,30 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 	action->control_flags = tick.flags;
 	action->primary_trigger = TEST_FLAG(tick.flags, _unit_control_weapon_primary_trigger_bit) ? 1.f : 0.f;
 	if (now % (TICKS_PER_SECOND * 5) == bot_index)
-		platform_log("companion: active bot %ld unit %ld leader %ld target %ld vehicle %ld gunner %d shooting %d following %d scavenge %d reload %d switch %ld melee %d distance %.1f throttle %.2f %.2f",
+	{
+		long loaded = NONE, reserve = NONE;
+		if (own_vehicle == NONE && tick.weapon_index != NONE)
+		{
+			struct weapon_datum *weapon = weapon_get(tick.weapon_index);
+			struct weapon_definition *definition = weapon_definition_get(weapon->definition_index);
+
+			if (definition->weapon.magazines.count > 0)
+			{
+				loaded = weapon->weapon.magazines[0].rounds_loaded;
+				reserve = weapon->weapon.magazines[0].rounds_total;
+			}
+		}
+		platform_log("companion: active bot %ld unit %ld leader %ld target %ld vehicle %ld gunner %d shooting %d following %d scavenge %d pursuing_melee %d reload %d switch %ld melee %d loaded %ld reserve %ld has_ammo %d distance %.1f throttle %.2f %.2f",
 			bot_index, tick.player->unit_index, leader, bot->target_unit_index, own_vehicle,
 			(int)gunner, (int)(action->primary_trigger > 0.f), (int)tick.moving,
-			(int)(bot->goal_kind == _bots_goal_item),
+			(int)(bot->goal_kind == _bots_goal_item), (int)melee_pursuit,
 			(int)TEST_FLAG(tick.flags, _unit_control_weapon_reload_bit),
 			action->desired_weapon_index,
 			(int)TEST_FLAG(tick.flags, _unit_control_use_equipment_bit),
+			loaded, reserve,
+			(int)(own_vehicle == NONE && bots_campaign_has_ammo(tick.unit)),
 			distance, action->throttle.i, action->throttle.j);
+	}
 }
 
 static void bots_report(void)
