@@ -1,0 +1,39 @@
+name: Vita companion test build
+
+# This is experimental and does not publish a release. The bot and
+# saved-game behavior need real-hardware validation before distribution.
+on:
+  push:
+    branches:
+      - feat/campaign-companion-1_1-vita
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vita:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: vitasdk/vitasdk:2026.08
+    steps:
+      - name: Install host build prerequisites
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git python3 ninja-build clang lld curl ca-certificates
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Configure Vita release
+        run: python3 configure.py --lto off --pgo off --portable --release
+      - name: Compile and package VPK
+        run: ninja vita
+      - name: Upload test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: haloce-vita-companion-test
+          path: |
+            build/vita/halo.vpk
+            build/vita/eboot.bin
+          if-no-files-found: error
+          retention-days: 3
