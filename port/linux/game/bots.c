@@ -964,6 +964,13 @@ static char const *bots_setting_string(char const *variable, char const *name)
 	return value && value[0] ? value : config_string(name);
 }
 
+/* The same configuration is used by the campaign lobby and the host's
+ * bot input loop. Kept off by default until explicitly enabled. */
+int bots_campaign_enabled(void)
+{
+	return bots_setting_integer("HALO_BOT_CAMPAIGN", "bots.campaign") != 0;
+}
+
 long bots_wanted_count(void)
 {
 	long count = bots_setting_integer("HALO_BOTS", "bots.count");
