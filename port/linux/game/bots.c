@@ -184,6 +184,9 @@ and left, the defenders' posts. The map's teleporters are logged once.
 
 #include "cseries.h"
 #include "game/game.h"
+#include "game/game_allegiance.h"
+#include "ai/actors.h"
+#include "units/unit_definitions.h"
 #include "game/game_engine.h"
 #include "game/players.h"
 #include "objects/objects.h"
@@ -513,6 +516,7 @@ struct bots_bot
 
 	/* its target */
 	long target_player_index;
+	long target_unit_index; /* campaign actors are not multiplayer players */
 	long target_seen_tick;
 	long target_first_seen_tick;
 	real_point3d target_last_position;
@@ -4866,6 +4870,7 @@ static void bots_bot_reset(struct bots_bot *bot, long player_index, long bot_ind
 	bot->player_index = player_index;
 	bot->unit_index = NONE;
 	bot->target_player_index = NONE;
+	bot->target_unit_index = NONE;
 	bot->target_last_surface_index = NONE;
 	bot->goal_surface_index = NONE;
 	bot->goal_serial = serial + 1;
@@ -6676,6 +6681,310 @@ static void bots_bot_update(struct bots_bot *bot, long bot_index, struct player_
 	bots_profile_part(_bots_part_rest, &started);
 }
 
+
+/* ---------- optional solo Vita campaign companion ----------
+ *
+ * Co-op's host simulates the spare player, instead of giving it a client
+ * controller. The action is generated at the same authoritative tick as
+ * the existing multiplayer bots. Keep this separate from the multiplayer
+ * bot's objectives (CTF, oddball, lane routes and vehicle driving).
+ *
+ * This is an experimental network-co-op companion. It does not modify the
+ * vanilla single-player save and does not simulate a second Vita.
+ */
+static long bots_campaign_leader(long companion_player_index)
+{
+	struct data_iterator iterator;
+	struct player_datum *player;
+
+	data_iterator_new(&iterator, player_data);
+	while ((player = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
+	{
+		if (iterator.datum_index != companion_player_index &&
+			!bots_machine_is_bot(player->network_player_data.machine_index) &&
+			player->unit_index != NONE &&
+			!TEST_FLAG(object_get(player->unit_index)->object.damage_flags, _object_dead_bit))
+			return player->unit_index;
+	}
+	return NONE;
+}
+
+static long bots_campaign_enemy(long companion_unit, real_point3d const *eye,
+	real yaw, long current_enemy, boolean gunner, struct bots_skill_definition const *skill)
+{
+	struct data_iterator iterator;
+	struct actor_datum *actor;
+	long best = NONE;
+	real best_score = REAL_MAX;
+
+	if (!actor_data)
+		return NONE;
+	data_iterator_new(&iterator, actor_data);
+	while ((actor = (struct actor_datum *)data_iterator_next(&iterator)) != NULL)
+	{
+		long unit = actor->meta.unit_index;
+		struct object_datum *object;
+		real distance, bearing, score, reach;
+
+		if (unit == NONE || !game_team_is_enemy(_game_team_player, actor->meta.team_index))
+			continue;
+		object = object_try_and_get(unit);
+		if (!object || TEST_FLAG(object->object.damage_flags, _object_dead_bit))
+			continue;
+		distance = bots_distance3d(eye, &object->object.bounding_sphere_center);
+		reach = gunner ? MAX(skill->sight_distance, 55.f) : skill->sight_distance;
+		if (unit == current_enemy)
+			reach *= 1.25f;
+		if (distance > reach)
+			continue;
+		bearing = (real)fabs(bots_angle_difference((real)atan2(
+			object->object.bounding_sphere_center.y - eye->y,
+			object->object.bounding_sphere_center.x - eye->x), yaw));
+		if (!gunner && bearing > 0.5f * skill->field_of_view_degrees * BOTS_DEGREES &&
+			distance > 3.f && unit != current_enemy)
+			continue;
+		score = distance + bearing * (gunner ? 0.4f : 4.f) -
+			(unit == current_enemy ? 6.f : 0.f);
+		if (score >= best_score || !bots_line_of_sight(companion_unit, eye,
+			&object->object.bounding_sphere_center, unit))
+			continue;
+		best = unit;
+		best_score = score;
+	}
+	return best;
+}
+
+static void bots_campaign_board(struct bots_bot *bot, struct bots_tick *tick, long leader_vehicle)
+{
+	short seat = NONE;
+	short preference;
+	struct object_datum *vehicle;
+
+	if (leader_vehicle == NONE || tick->object->object.parent_object_index != NONE)
+		return;
+	vehicle = object_try_and_get(leader_vehicle);
+	if (!vehicle || TEST_FLAG(vehicle->object.damage_flags, _object_dead_bit) ||
+		bots_distance2d(&tick->position, &vehicle->object.position) > 3.5f ||
+		fabs(tick->position.z - vehicle->object.position.z) > 2.5f)
+		return;
+	/* 1 = gunner; 2 = passenger. The companion must never be a driver. */
+	for (preference = 1; preference <= 2; preference++)
+	{
+		if (vehicle_scripting_find_available_seats(leader_vehicle, "", preference, &seat, 1) > 0 &&
+			unit_can_enter_seat(tick->player->unit_index, leader_vehicle, seat, NULL))
+		{
+			struct unit_definition *definition = unit_definition_get(unit_get(leader_vehicle)->definition_index);
+			struct unit_seat *seat_data = TAG_BLOCK_GET_ELEMENT(
+				&definition->unit.seats, seat, struct unit_seat);
+			unit_scripting_enter_vehicle(tick->player->unit_index, leader_vehicle, seat_data->label);
+			if (tick->object->object.parent_object_index == leader_vehicle)
+			{
+				bot->goal_kind = _bots_goal_none;
+				bot->path.valid = FALSE;
+				platform_log("companion: boarded vehicle %ld as %s", leader_vehicle,
+					preference == 1 ? "gunner" : "passenger");
+				return;
+			}
+		}
+	}
+}
+
+static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct player_action *action)
+{
+	struct bots_tick tick;
+	struct object_datum *target;
+	long leader, leader_vehicle = NONE, own_vehicle, now = game_time_get();
+	boolean gunner = FALSE;
+	real distance;
+
+	csmemset(&tick, 0, sizeof(tick));
+	csmemset(action, 0, sizeof(*action));
+	action->desired_weapon_index = NONE;
+	action->desired_grenade_index = NONE;
+	action->desired_zoom_level = NONE;
+	tick.action = action;
+	tick.skill = &bots_skills[bots_globals.skill];
+	tick.player = player_get(bot->player_index);
+	tick.now = now;
+	tick.throttle_scale = 1.f;
+	if (tick.player->unit_index == NONE)
+	{
+		bot->unit_index = NONE;
+		bot->target_unit_index = NONE;
+		return;
+	}
+	tick.unit = unit_get(tick.player->unit_index);
+	tick.object = object_get(tick.player->unit_index);
+	tick.position = tick.object->object.position;
+	if (bot->unit_index != tick.player->unit_index)
+	{
+		bot->unit_index = tick.player->unit_index;
+		bot->yaw = (real)atan2(tick.object->object.forward.j, tick.object->object.forward.i);
+		bot->pitch = 0.f;
+		bot->target_unit_index = NONE;
+		bot->target_seen_tick = 0;
+		bot->target_first_seen_tick = now;
+		bot->stuck_position = tick.position;
+		bot->stuck_tick = now;
+		bot->path.valid = FALSE;
+		bot->goal_kind = _bots_goal_none;
+	}
+	leader = bots_campaign_leader(bot->player_index);
+	if (leader == NONE)
+		return;
+	leader_vehicle = bots_unit_vehicle(leader);
+	own_vehicle = bots_unit_vehicle(tick.player->unit_index);
+	if (own_vehicle != NONE && own_vehicle != leader_vehicle)
+	{
+		/* The gunner leaves once the leader dismounts. */
+		unit_try_and_exit_seat(tick.player->unit_index);
+	}
+	if (own_vehicle == NONE)
+		bots_campaign_board(bot, &tick, leader_vehicle);
+	own_vehicle = bots_unit_vehicle(tick.player->unit_index);
+	if (own_vehicle != NONE)
+	{
+		struct unit_datum *vehicle = unit_get(own_vehicle);
+		gunner = vehicle->unit.gunner_object_index == tick.player->unit_index;
+		tick.position = vehicle->object.position;
+		tick.weapon_index = gunner ? bots_current_weapon(vehicle) : NONE;
+	}
+	else
+		tick.weapon_index = bots_current_weapon(tick.unit);
+
+	/* The NPCs in a campaign are actors, not other multiplayer players. */
+	if ((now + bot_index) % 3 == 0)
+	{
+		long enemy = bots_campaign_enemy(tick.player->unit_index,
+			bots_tick_eye(&tick), bot->yaw, bot->target_unit_index, gunner, tick.skill);
+		if (enemy != NONE)
+		{
+			if (enemy != bot->target_unit_index ||
+				now - bot->target_seen_tick > TICKS_PER_SECOND * 2)
+			{
+				bot->target_first_seen_tick = now;
+				bot->aim_error_yaw = bots_random_signed(bot) *
+					tick.skill->aim_error_degrees * BOTS_DEGREES;
+				bot->aim_error_pitch = bots_random_signed(bot) *
+					tick.skill->aim_error_degrees * 0.6f * BOTS_DEGREES;
+			}
+			bot->target_unit_index = enemy;
+			bot->target_seen_tick = now;
+		}
+		else if (now - bot->target_seen_tick > TICKS_PER_SECOND)
+			bot->target_unit_index = NONE;
+	}
+
+	target = bot->target_unit_index != NONE ? object_try_and_get(bot->target_unit_index) : NULL;
+	if (target && !TEST_FLAG(target->object.damage_flags, _object_dead_bit) &&
+		now - bot->target_seen_tick < TICKS_PER_SECOND / 2)
+	{
+		real_point3d const *eye = bots_tick_eye(&tick);
+		real dx = target->object.bounding_sphere_center.x - eye->x;
+		real dy = target->object.bounding_sphere_center.y - eye->y;
+		real dz = target->object.bounding_sphere_center.z - eye->z;
+		real horizontal = (real)sqrt(dx * dx + dy * dy);
+		real desired_yaw = (real)atan2(dy, dx) + bot->aim_error_yaw;
+		real desired_pitch = (real)atan2(dz, MAX(horizontal, 0.01f)) + bot->aim_error_pitch;
+		real turn = tick.skill->turn_degrees_per_tick * BOTS_DEGREES;
+		real yaw_off, pitch_off, cone;
+
+		distance = bots_distance3d(eye, &target->object.bounding_sphere_center);
+		bot->aim_error_yaw *= 0.96f;
+		bot->aim_error_pitch *= 0.96f;
+		bot->yaw += PIN(bots_angle_difference(desired_yaw, bot->yaw), -turn, turn);
+		bot->pitch += PIN(desired_pitch - bot->pitch, -turn, turn);
+		yaw_off = (real)fabs(bots_angle_difference((real)atan2(dy, dx), bot->yaw));
+		pitch_off = (real)fabs((real)atan2(dz, MAX(horizontal, 0.01f)) - bot->pitch);
+		cone = (real)atan(0.35f / MAX(distance, 0.5f)) * tick.skill->fire_cone + 0.01f;
+		if ((own_vehicle == NONE || gunner) &&
+			now - bot->target_first_seen_tick >= (long)(tick.skill->reaction_seconds * TICKS_PER_SECOND) &&
+			yaw_off < cone && pitch_off < cone * 1.5f &&
+			(gunner || (tick.weapon_index != NONE && !bots_weapon_empty(tick.weapon_index))))
+		{
+			/* Turret trigger belongs to the *vehicle*, not the biped's
+			 * ammunition pool. No driver input is ever generated. */
+			if (now < bot->burst_until_tick ||
+				now >= bot->pause_until_tick)
+			{
+				if (now >= bot->burst_until_tick)
+				{
+					bot->burst_until_tick = now + tick.skill->burst_ticks;
+					bot->pause_until_tick = bot->burst_until_tick + tick.skill->pause_ticks;
+				}
+				tick.flags |= FLAG(_unit_control_weapon_primary_trigger_bit);
+			}
+		}
+	}
+	else
+	{
+		bot->target_unit_index = NONE;
+		bot->yaw += BOTS_DEGREES * (own_vehicle != NONE ? 3.f : 0.5f);
+		bot->pitch *= 0.98f;
+	}
+
+	if (own_vehicle == NONE)
+	{
+		struct object_datum *human = object_get(leader_vehicle != NONE ? leader_vehicle : leader);
+		real_point3d goal = human->object.position;
+		real path_direction = 0.f;
+
+		distance = bots_distance2d(&tick.position, &goal);
+		if (distance > (leader_vehicle != NONE ? 2.8f : 4.5f))
+		{
+			real_point3d ground;
+			long surface = bots_unit_surface(leader_vehicle != NONE ? leader_vehicle : leader, &ground);
+			if (surface != NONE)
+			{
+				bots_set_goal(bot, _bots_goal_objective, &ground, surface);
+				bots_search_take(bot, TRUE);
+			}
+			if (!bots_follow_path(bot, tick.player->unit_index, &tick.position, &path_direction))
+				path_direction = (real)atan2(goal.y - tick.position.y, goal.x - tick.position.x);
+			tick.move_direction = path_direction;
+			tick.moving = TRUE;
+			tick.throttle_scale = 1.f;
+			/* The companion looks at enemies without walking away from the
+			 * human; it walks after them rather than combat-strafing. */
+			if (bot->target_unit_index == NONE)
+				bot->yaw += PIN(bots_angle_difference(path_direction, bot->yaw),
+					-12.f * BOTS_DEGREES, 12.f * BOTS_DEGREES);
+			if (now - bot->stuck_tick >= TICKS_PER_SECOND)
+			{
+				if (bots_distance2d(&tick.position, &bot->stuck_position) < 0.4f)
+					tick.flags |= FLAG(_unit_control_jump_bit);
+				bot->stuck_position = tick.position;
+				bot->stuck_tick = now;
+			}
+		}
+		else
+		{
+			bot->goal_kind = _bots_goal_none;
+			bot->path.valid = FALSE;
+		}
+		bots_bot_weapons(bot, &tick);
+	}
+	/* A passenger cannot fire. A seated bot cannot walk or throw grenades. */
+	if (own_vehicle != NONE && !gunner)
+		tick.flags &= ~FLAG(_unit_control_weapon_primary_trigger_bit);
+	if (tick.moving)
+	{
+		real relative = bots_angle_difference(tick.move_direction, bot->yaw);
+		action->throttle.i = (real)cos(relative) * tick.throttle_scale;
+		action->throttle.j = (real)sin(relative) * tick.throttle_scale;
+	}
+	bot->pitch = PIN(bot->pitch, -1.4f, 1.4f);
+	bot->yaw = bots_angle_difference(bot->yaw, 0.f);
+	action->desired_facing.yaw = bot->yaw;
+	action->desired_facing.pitch = bot->pitch;
+	action->control_flags = tick.flags;
+	action->primary_trigger = TEST_FLAG(tick.flags, _unit_control_weapon_primary_trigger_bit) ? 1.f : 0.f;
+	if (now % (TICKS_PER_SECOND * 20) == bot_index)
+		platform_log("companion: target %ld vehicle %ld gunner %d shooting %d distance %.1f",
+			bot->target_unit_index, own_vehicle, (int)gunner,
+			(int)(action->primary_trigger > 0.f), distance);
+}
+
 static void bots_report(void)
 {
 	long now = game_time_get();
@@ -6774,7 +7083,10 @@ void bots_update_actions(struct player_action *actions)
 	unsigned long long started;
 	long count = 0;
 
-	if (!game_engine_running() || !network_game_is_splitscreen_local())
+	boolean campaign_session = !game_engine_running() && game_is_cooperative() &&
+		game_connection() == _game_connection_network_server && bots_campaign_enabled();
+
+	if ((!game_engine_running() || !network_game_is_splitscreen_local()) && !campaign_session)
 		return;
 	started = vita_host_time_us();
 	bots_profile_enabled();
@@ -6799,11 +7111,13 @@ void bots_update_actions(struct player_action *actions)
 			unsigned long long scan_started = bots_profile.enabled > 0 ? vita_host_time_us() : 0;
 
 			bots_ground_memo_begin();
-			bots_powerups_find();
+			if (!campaign_session)
+				bots_powerups_find();
 			bots_paths_scan();
 			/* port: the map's lanes and vantage points (a bounded step a
 			tick), the roles (bots_tactics.h) */
-			bots_tactics_update();
+			if (!campaign_session)
+				bots_tactics_update();
 			bots_profile_part(_bots_part_scan, &scan_started);
 		}
 		bot_index = player->network_player_data.machine_index - BOTS_FIRST_MACHINE;
@@ -6811,7 +7125,12 @@ void bots_update_actions(struct player_action *actions)
 		if (bot->player_index != iterator.datum_index)
 			bots_bot_reset(bot, iterator.datum_index, bot_index);
 		if (absolute_index >= 0 && absolute_index < HALO_PORT_MAXIMUM_NETWORK_PLAYERS)
-			bots_bot_update(bot, bot_index, &actions[absolute_index]);
+		{
+			if (campaign_session)
+				bots_campaign_action(bot, bot_index, &actions[absolute_index]);
+			else
+				bots_bot_update(bot, bot_index, &actions[absolute_index]);
+		}
 		count++;
 	}
 	bots_ground_memo.active = FALSE;
