@@ -3428,6 +3428,27 @@ boolean server_has_a_player_on_each_machine(
 	return TRUE;
 }
 
+/* An AI campaign companion is a virtual player, not a socket-connected
+ * machine. Let a solo Vita host begin a cooperative level with it. */
+#ifdef HALO_LINUX
+static boolean network_game_server_has_campaign_companion(struct network_game_server *server)
+{
+	long slot;
+
+	if (!bots_campaign_enabled() || network_game_is_splitscreen_local() ||
+		server->game.variant.game_engine_index != 0 ||
+		!custom_edition_maps_campaign_level(server->game.map.name))
+		return FALSE;
+	for (slot = 0; slot < MAXIMUM_NETWORK_PLAYER_COUNT; slot++)
+	{
+		struct network_player *player = &server->game.players[slot];
+		if (network_player_is_valid(player) && bots_machine_is_bot(player->machine_index))
+			return TRUE;
+	}
+	return FALSE;
+}
+#endif
+
 boolean server_has_enough_machines(
 	struct network_game_server *server)
 {
@@ -3451,6 +3472,11 @@ boolean server_has_enough_machines(
 	}
 
 	has_enough_machines = machine_count >= minimum_machine_count;
+#ifdef HALO_LINUX
+	if (!has_enough_machines && machine_count >= 1 &&
+		network_game_server_has_campaign_companion(server))
+		has_enough_machines = TRUE;
+#endif
 
 	return has_enough_machines;
 }
@@ -4176,7 +4202,11 @@ void network_game_server_update_countdown(
 				else
 				{
 					if (network_game_should_accept_remote_connections() == FALSE ||
-						network_game_server_get_client_machine_count(server) > 1)
+						network_game_server_get_client_machine_count(server) > 1
+#ifdef HALO_LINUX
+							|| network_game_server_has_campaign_companion(server)
+#endif
+							)
 					{
 						unsigned long countdown;
 
