@@ -6799,7 +6799,7 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 	struct object_datum *target;
 	long leader, leader_vehicle = NONE, own_vehicle, now = game_time_get();
 	boolean gunner = FALSE;
-	real distance;
+	real distance = 0.f;
 
 	csmemset(&tick, 0, sizeof(tick));
 	csmemset(action, 0, sizeof(*action));
