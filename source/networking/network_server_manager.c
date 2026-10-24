@@ -4799,7 +4799,7 @@ static void network_game_server_port_bots(
 
 		if (campaign_companion)
 			team_index = human_team;
-		if (bots_teams() == _bots_teams_against)
+		else if (bots_teams() == _bots_teams_against)
 			team_index = human_team == 0 ? 1 : 0;
 		else
 			team_index = team_counts[1] < team_counts[0] ? 1 : 0;
