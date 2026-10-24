@@ -30,6 +30,7 @@ enum
 /* the settings (bots.count, bots.skill, bots.teams: the Vita's settings
 panel changes them at any time, so they are read each time) */
 long bots_wanted_count(void);
+int bots_campaign_enabled(void);
 short bots_skill(void);
 short bots_teams(void);
 
