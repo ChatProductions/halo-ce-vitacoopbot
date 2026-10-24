@@ -299,7 +299,7 @@ static const struct config_setting config_settings[] =
 		"maximum; 0 for the build's maximum). A co-op game takes\n"
 		"network.coop_players. The Vita's settings panel (Multiplayer, Play,\n"
 		"Max players) sets it." },
-	{ "bots.campaign", _config_boolean, "false", "HALO_BOT_CAMPAIGN", _environment_value, _platform_all,
+	{ "bots.campaign", _config_integer, "0", "HALO_BOT_CAMPAIGN", _environment_value, _platform_all,
 		"Experimental: one AI companion fills the second co-op player slot on a Vita-hosted campaign.\\n"
 		"Not for public co-op sessions; uses the multiplayer campaign session, not single-player saves." },
 	{ "bots.count", _config_integer, "0", "HALO_BOTS", _environment_value, _platform_all,
