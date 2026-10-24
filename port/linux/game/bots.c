@@ -216,6 +216,7 @@ and left, the defenders' posts. The map's teleporters are logged once.
 
 #include "bots.h"
 #include "bots_tactics.h"
+#include "network_coop.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -6813,6 +6814,8 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 	tick.throttle_scale = 1.f;
 	if (tick.player->unit_index == NONE)
 	{
+		if (now > 0 && now % (TICKS_PER_SECOND * 10) == 0)
+			platform_log("companion: player exists but has no unit (slot %ld)", bot_index);
 		bot->unit_index = NONE;
 		bot->target_unit_index = NONE;
 		return;
@@ -6835,7 +6838,12 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 	}
 	leader = bots_campaign_leader(bot->player_index);
 	if (leader == NONE)
+	{
+		if (now > 0 && now % (TICKS_PER_SECOND * 10) == 0)
+			platform_log("companion: no human leader unit (bot %ld, unit %ld)", bot_index,
+				tick.player->unit_index);
 		return;
+	}
 	leader_vehicle = bots_unit_vehicle(leader);
 	own_vehicle = bots_unit_vehicle(tick.player->unit_index);
 	if (own_vehicle != NONE && own_vehicle != leader_vehicle)
@@ -6934,7 +6942,7 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 		real path_direction = 0.f;
 
 		distance = bots_distance2d(&tick.position, &goal);
-		if (distance > (leader_vehicle != NONE ? 2.8f : 4.5f))
+		if (distance > (leader_vehicle != NONE ? 2.8f : 2.5f))
 		{
 			real_point3d ground;
 			long surface = bots_unit_surface(leader_vehicle != NONE ? leader_vehicle : leader, &ground);
@@ -6943,7 +6951,11 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 				bots_set_goal(bot, _bots_goal_objective, &ground, surface);
 				bots_search_take(bot, TRUE);
 			}
-			if (!bots_follow_path(bot, tick.player->unit_index, &tick.position, &path_direction))
+			/* Do not allow a stale or unavailable path to pin the ally in
+			 * place near the human. The short approach uses direct steering;
+			 * long routes can still use the navigation search. */
+			if (distance < 12.f ||
+				!bots_follow_path(bot, tick.player->unit_index, &tick.position, &path_direction))
 				path_direction = (real)atan2(goal.y - tick.position.y, goal.x - tick.position.x);
 			tick.move_direction = path_direction;
 			tick.moving = TRUE;
@@ -6983,10 +6995,11 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 	action->desired_facing.pitch = bot->pitch;
 	action->control_flags = tick.flags;
 	action->primary_trigger = TEST_FLAG(tick.flags, _unit_control_weapon_primary_trigger_bit) ? 1.f : 0.f;
-	if (now % (TICKS_PER_SECOND * 20) == bot_index)
-		platform_log("companion: target %ld vehicle %ld gunner %d shooting %d distance %.1f",
-			bot->target_unit_index, own_vehicle, (int)gunner,
-			(int)(action->primary_trigger > 0.f), distance);
+	if (now % (TICKS_PER_SECOND * 5) == bot_index)
+		platform_log("companion: active bot %ld unit %ld leader %ld target %ld vehicle %ld gunner %d shooting %d following %d distance %.1f throttle %.2f %.2f",
+			bot_index, tick.player->unit_index, leader, bot->target_unit_index, own_vehicle,
+			(int)gunner, (int)(action->primary_trigger > 0.f), (int)tick.moving,
+			distance, action->throttle.i, action->throttle.j);
 }
 
 static void bots_report(void)
@@ -7087,8 +7100,16 @@ void bots_update_actions(struct player_action *actions)
 	unsigned long long started;
 	long count = 0;
 
-	boolean campaign_session = !game_engine_running() && game_is_cooperative() &&
+	/* Network co-op's actual state comes from the loaded solo scenario, not
+	 * player_spawn_count, which does not reliably reflect the fake machine.
+	 * Report any gate failure so a stationary companion can be diagnosed. */
+	boolean campaign_session = network_coop_active() &&
 		game_connection() == _game_connection_network_server && bots_campaign_enabled();
+	if (bots_campaign_enabled() && game_connection() == _game_connection_network_server &&
+		game_time_get() > 0 && game_time_get() % (TICKS_PER_SECOND * 10) == 0)
+		platform_log("companion: tick gate coop=%d engine=%d players_coop=%d session=%d",
+			(int)network_coop_active(), (int)game_engine_running(),
+			(int)game_is_cooperative(), (int)campaign_session);
 
 	if ((!game_engine_running() || !network_game_is_splitscreen_local()) && !campaign_session)
 		return;
