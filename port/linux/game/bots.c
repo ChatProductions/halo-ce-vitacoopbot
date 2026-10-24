@@ -1374,10 +1374,19 @@ static boolean bots_weapon_empty(long weapon_index)
 {
 	struct weapon_datum *weapon = weapon_get(weapon_index);
 	struct weapon_definition *definition = weapon_definition_get(weapon->definition_index);
+	long magazine;
 
+	/* Plasma weapons consume battery charge instead of magazine rounds. */
 	if (definition->weapon.magazines.count <= 0)
-		return FALSE;
-	return weapon->weapon.magazines[0].rounds_loaded + weapon->weapon.magazines[0].rounds_total <= 0;
+		return weapon->weapon.age >= 0.995f;
+	for (magazine = 0; magazine < definition->weapon.magazines.count &&
+		magazine < (long)NUMBEROF(weapon->weapon.magazines); magazine++)
+	{
+		if (weapon->weapon.magazines[magazine].rounds_loaded > 0 ||
+			weapon->weapon.magazines[magazine].rounds_total > 0)
+			return FALSE;
+	}
+	return TRUE;
 }
 
 /* how full the weapon's magazine is, 0 to 1 (1 for one without) */
@@ -1677,7 +1686,7 @@ static void bots_item_set_unreachable(struct bots_bot *bot, long item_index)
 /* an item on the ground worth fetching near the bot: a weapon better than
 the one it holds; NONE for none (port: the powerups are bots_powerup_goal's) */
 static long bots_find_item(struct bots_bot *bot, struct unit_datum *unit, real_point3d const *position,
-	real maximum_distance)
+	real maximum_distance, boolean desperate)
 {
 	struct object_iterator iterator;
 	long best_index = NONE;
@@ -1714,9 +1723,20 @@ static long bots_find_item(struct bots_bot *bot, struct unit_datum *unit, real_p
 			if (other != NONE && weapon_get(other)->definition_index == item->definition_index)
 				held = TRUE;
 		}
-		if (held || value <= current_value)
-			continue;
-		score = distance - (real)(value - current_value) * 3.0f;
+		/* A companion with no ammunition may pick up a duplicate weapon
+		for its rounds. Armed multiplayer bots still seek upgrades only. */
+		if (desperate)
+		{
+			if (value < 0 || bots_weapon_empty(iterator.index))
+				continue;
+			score = distance - (real)value * 0.2f;
+		}
+		else
+		{
+			if (held || value <= current_value || bots_weapon_empty(iterator.index))
+				continue;
+			score = distance - (real)(value - current_value) * 3.0f;
+		}
 		if (score < best_score)
 		{
 			best_score = score;
@@ -4038,6 +4058,69 @@ static void bots_set_goal(struct bots_bot *bot, short kind, real_point3d const *
 	bot->climb_until_tick = 0;
 }
 
+/* An empty campaign companion checks every carried weapon before going
+after a dropped one. Reloadable magazines still count as usable. */
+static boolean bots_campaign_has_ammo(struct unit_datum *unit)
+{
+	short slot;
+
+	for (slot = 0; slot < MAXIMUM_WEAPONS_PER_UNIT; slot++)
+	{
+		long weapon_index = unit->unit.weapon_object_indices[slot];
+
+		if (weapon_index != NONE && !bots_weapon_empty(weapon_index))
+			return TRUE;
+	}
+	return FALSE;
+}
+
+/* Unlike multiplayer roaming, a campaign companion only searches nearby
+dropped weapons when BOTH carried weapons are empty. The existing goal,
+pickup and path code does the actual walk and weapon swap. */
+static boolean bots_campaign_scavenge(struct bots_bot *bot, struct unit_datum *unit,
+	real_point3d const *position)
+{
+	long now = game_time_get();
+
+	if (bot->goal_kind == _bots_goal_item)
+	{
+		struct item_datum *item = (struct item_datum *)object_try_and_get_and_verify_type(
+			bot->item_index, _object_mask_weapon);
+
+		if (item && item->object.parent_object_index == NONE &&
+			!bots_weapon_empty(bot->item_index) &&
+			now - bot->goal_tick < TICKS_PER_SECOND * 14 &&
+			(bot->item_first_press_tick < bot->goal_tick ||
+			 now - bot->item_first_press_tick < TICKS_PER_SECOND * 3))
+			return TRUE;
+		if (item && item->object.parent_object_index == NONE)
+			bots_item_set_unreachable(bot, bot->item_index);
+		bot->goal_kind = _bots_goal_none;
+		bot->path.valid = FALSE;
+		bot->item_check_tick = now + TICKS_PER_SECOND;
+	}
+	if (now < bot->item_check_tick)
+		return FALSE;
+	bot->item_check_tick = now + TICKS_PER_SECOND;
+	{
+		long item_index = bots_find_item(bot, unit, position, 18.0f, TRUE);
+
+		if (item_index != NONE)
+		{
+			real_point3d ground;
+			long surface = bots_surface_below(&object_get(item_index)->object.position, &ground);
+
+			if (surface != NONE)
+			{
+				bots_set_goal(bot, _bots_goal_item, &ground, surface);
+				bot->item_index = item_index;
+				return TRUE;
+			}
+		}
+	}
+	return FALSE;
+}
+
 /* the next place to roam to: most often towards an enemy (the roaming place
 nearest a living enemy, as a player knows where the other team's base is
 and reads the motion tracker), else anywhere */
@@ -4673,7 +4756,7 @@ static void bots_choose_goal(struct bots_bot *bot, long player_index, real_point
 	}
 	if (now >= bot->item_check_tick)
 	{
-		long item_index = bots_find_item(bot, unit_get(player_get(player_index)->unit_index), position, fighting ? 8.0f : 20.0f);
+		long item_index = bots_find_item(bot, unit_get(player_get(player_index)->unit_index), position, fighting ? 8.0f : 20.0f, FALSE);
 
 		bot->item_check_tick = now + TICKS_PER_SECOND;
 		if (item_index != NONE)
@@ -5194,10 +5277,29 @@ players_update_before_game's player_handle_weapon_swap), let go now and
 then, so that a second swap can follow a first */
 static void bots_bot_weapons(struct bots_bot *bot, struct bots_tick *tick)
 {
-	if (tick->weapon_index != NONE && bots_weapon_empty(tick->weapon_index))
+	/* A dry magazine with reserve ammunition needs a reload, not another
+	trigger pull. Ask for a reload even in combat and stop firing this tick. */
+	if (tick->weapon_index != NONE && !bots_weapon_empty(tick->weapon_index))
+	{
+		struct weapon_datum *weapon = weapon_get(tick->weapon_index);
+		struct weapon_definition *definition = weapon_definition_get(weapon->definition_index);
+
+		if (definition->weapon.magazines.count > 0 &&
+			weapon->weapon.magazines[0].rounds_loaded <= 0 &&
+			weapon->weapon.magazines[0].rounds_total > 0)
+		{
+			tick->flags &= ~FLAG(_unit_control_weapon_primary_trigger_bit);
+			tick->flags |= FLAG(_unit_control_weapon_reload_bit);
+		}
+	}
+	if (tick->weapon_index == NONE || bots_weapon_empty(tick->weapon_index))
 	{
 		short slot;
 
+		/* Never keep firing an empty weapon. Switch to one with ammunition. */
+		tick->flags &= ~FLAG(_unit_control_weapon_primary_trigger_bit);
+		bot->burst_until_tick = 0;
+		bot->pause_until_tick = 0;
 		for (slot = 0; slot < MAXIMUM_WEAPONS_PER_UNIT; slot++)
 		{
 			long other = tick->unit->unit.weapon_object_indices[slot];
@@ -6835,6 +6937,11 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 		bot->stuck_tick = now;
 		bot->path.valid = FALSE;
 		bot->goal_kind = _bots_goal_none;
+		bot->item_index = NONE;
+		bot->item_check_tick = 0;
+		bot->item_first_press_tick = 0;
+		bot->previous_control_flags = 0;
+		bot->melee_tick = 0;
 	}
 	leader = bots_campaign_leader(bot->player_index);
 	if (leader == NONE)
@@ -6927,6 +7034,15 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 				tick.flags |= FLAG(_unit_control_weapon_primary_trigger_bit);
 			}
 		}
+		/* Use the same melee control as multiplayer bots. This is a
+		campaign actor, so bots_bot_fight() cannot be called here. */
+		if (own_vehicle == NONE && distance < 1.1f &&
+			yaw_off < 0.6f && now >= bot->melee_tick)
+		{
+			tick.flags &= ~FLAG(_unit_control_weapon_primary_trigger_bit);
+			tick.flags |= FLAG(_unit_control_use_equipment_bit);
+			bot->melee_tick = now + TICKS_PER_SECOND;
+		}
 	}
 	else
 	{
@@ -6938,18 +7054,41 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 	if (own_vehicle == NONE)
 	{
 		struct object_datum *human = object_get(leader_vehicle != NONE ? leader_vehicle : leader);
+		boolean scavenging = FALSE;
 		real_point3d goal = human->object.position;
 		real path_direction = 0.f;
 
-		distance = bots_distance2d(&tick.position, &goal);
-		if (distance > (leader_vehicle != NONE ? 2.8f : 2.5f))
+		/* A driver waiting in a vehicle takes priority. Otherwise go for
+		ammunition before running after the human with empty weapons. */
+		if (leader_vehicle == NONE && !bots_campaign_has_ammo(tick.unit))
+			scavenging = bots_campaign_scavenge(bot, tick.unit, &tick.position);
+		else if (bot->goal_kind == _bots_goal_item)
 		{
-			real_point3d ground;
-			long surface = bots_unit_surface(leader_vehicle != NONE ? leader_vehicle : leader, &ground);
-			if (surface != NONE)
+			bot->goal_kind = _bots_goal_none;
+			bot->path.valid = FALSE;
+		}
+		if (scavenging)
+		{
+			struct object_datum *item = object_try_and_get_and_verify_type(
+				bot->item_index, _object_mask_weapon);
+
+			if (item)
+				goal = item->object.position;
+			bots_search_take(bot, TRUE);
+		}
+		distance = bots_distance2d(&tick.position, &goal);
+		if (distance > (scavenging ? 0.45f : (leader_vehicle != NONE ? 2.8f : 2.5f)))
+		{
+			if (!scavenging)
 			{
-				bots_set_goal(bot, _bots_goal_objective, &ground, surface);
-				bots_search_take(bot, TRUE);
+				real_point3d ground;
+				long surface = bots_unit_surface(leader_vehicle != NONE ? leader_vehicle : leader, &ground);
+
+				if (surface != NONE)
+				{
+					bots_set_goal(bot, _bots_goal_objective, &ground, surface);
+					bots_search_take(bot, TRUE);
+				}
 			}
 			/* Do not allow a stale or unavailable path to pin the ally in
 			 * place near the human. The short approach uses direct steering;
@@ -6973,11 +7112,13 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 				bot->stuck_tick = now;
 			}
 		}
-		else
+		else if (!scavenging)
 		{
 			bot->goal_kind = _bots_goal_none;
 			bot->path.valid = FALSE;
 		}
+		/* At a dropped weapon the normal pickup/swap input is generated.
+		Reload/switch decisions are applied independently of movement. */
 		bots_bot_weapons(bot, &tick);
 	}
 	/* A passenger cannot fire. A seated bot cannot walk or throw grenades. */
@@ -6993,12 +7134,28 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 	bot->yaw = bots_angle_difference(bot->yaw, 0.f);
 	action->desired_facing.yaw = bot->yaw;
 	action->desired_facing.pitch = bot->pitch;
+	/* Jump, melee and reload are presses, not permanently held buttons.
+	The swap button remains held for pickup, like a human holding X. */
+	{
+		unsigned long pressed = FLAG(_unit_control_jump_bit) |
+			FLAG(_unit_control_throw_grenade_bit) |
+			FLAG(_unit_control_use_equipment_bit) |
+			FLAG(_unit_control_weapon_reload_bit) |
+			FLAG(_unit_control_action_bit);
+
+		tick.flags &= ~(bot->previous_control_flags & pressed);
+		bot->previous_control_flags = tick.flags;
+	}
 	action->control_flags = tick.flags;
 	action->primary_trigger = TEST_FLAG(tick.flags, _unit_control_weapon_primary_trigger_bit) ? 1.f : 0.f;
 	if (now % (TICKS_PER_SECOND * 5) == bot_index)
-		platform_log("companion: active bot %ld unit %ld leader %ld target %ld vehicle %ld gunner %d shooting %d following %d distance %.1f throttle %.2f %.2f",
+		platform_log("companion: active bot %ld unit %ld leader %ld target %ld vehicle %ld gunner %d shooting %d following %d scavenge %d reload %d switch %ld melee %d distance %.1f throttle %.2f %.2f",
 			bot_index, tick.player->unit_index, leader, bot->target_unit_index, own_vehicle,
 			(int)gunner, (int)(action->primary_trigger > 0.f), (int)tick.moving,
+			(int)(bot->goal_kind == _bots_goal_item),
+			(int)TEST_FLAG(tick.flags, _unit_control_weapon_reload_bit),
+			action->desired_weapon_index,
+			(int)TEST_FLAG(tick.flags, _unit_control_use_equipment_bit),
 			distance, action->throttle.i, action->throttle.j);
 }
 
