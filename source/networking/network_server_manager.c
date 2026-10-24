@@ -4729,6 +4729,8 @@ static void network_game_server_port_bots(
 	long slot_of_bot[BOTS_MAXIMUM];
 	long team_counts[NUMBER_OF_MULTIPLAYER_TEAMS] = { 0, 0 };
 	long human_team = NONE;
+	long human_count = 0;
+	boolean campaign_companion;
 	long wanted = 0;
 	long slot;
 	long bot_index;
@@ -4736,6 +4738,13 @@ static void network_game_server_port_bots(
 
 	if (server->state != _network_game_server_state_pregame || server->sent_start_game_message)
 		return;
+	/* Networked co-op has no multiplayer game engine. On Vita, a solo
+	 * co-op host may opt to fill its second player slot with a bot.
+	 * The bot is never inserted in normal internet or system-link games.
+	 * If another real player has joined the lobby, remove the bot. */
+	campaign_companion = !server->game.variant.game_engine_index &&
+		custom_edition_maps_campaign_level(server->game.map.name) &&
+		bots_campaign_enabled() && !network_game_is_splitscreen_local();
 	if (network_game_is_splitscreen_local())
 		wanted = PIN(bots_wanted_count(), 0, BOTS_MAXIMUM);
 	for (bot_index = 0; bot_index < BOTS_MAXIMUM; bot_index++)
@@ -4750,6 +4759,7 @@ static void network_game_server_port_bots(
 			slot_of_bot[player->machine_index - BOTS_FIRST_MACHINE] = slot;
 		else
 		{
+			human_count++;
 			if (VALID_INDEX(player->team_index, NUMBER_OF_MULTIPLAYER_TEAMS))
 			{
 				team_counts[player->team_index]++;
@@ -4758,7 +4768,10 @@ static void network_game_server_port_bots(
 			}
 		}
 	}
-	/* (no bots before a player is in: the lobby's own first player) */
+	/* One human + one companion in a campaign lobby; a second human
+	 * replaces the companion, without changing multiplayer bot behavior. */
+	if (campaign_companion && human_count == 1)
+		wanted = 1;
 	if (human_team == NONE)
 		wanted = 0;
 
@@ -4784,6 +4797,8 @@ static void network_game_server_port_bots(
 		struct network_player *player;
 		long team_index;
 
+		if (campaign_companion)
+			team_index = human_team;
 		if (bots_teams() == _bots_teams_against)
 			team_index = human_team == 0 ? 1 : 0;
 		else
