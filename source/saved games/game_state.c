@@ -545,7 +545,7 @@ void game_state_save_to_persistent_storage(
 #ifdef HALO_LINUX
 	/* port: the campaign save is the campaign's: a level not in it (a
 	Custom Edition campaign map's) is never saved in its place */
-	if (main_get_current_solo_level() == NONE)
+	if (main_get_current_solo_level() == NONE && !game_state_port_companion_session())
 	{
 		error(_error_silent, "save and quit: not a campaign level, not saved (the campaign save is kept)");
 		return;
