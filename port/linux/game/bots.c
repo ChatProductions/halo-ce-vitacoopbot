@@ -6944,6 +6944,8 @@ static void bots_campaign_board(struct bots_bot *bot, struct bots_tick *tick, lo
 		return;
 	vehicle = object_try_and_get(leader_vehicle);
 	if (!vehicle || TEST_FLAG(vehicle->object.damage_flags, _object_dead_bit) ||
+		/* The game's vehicle_is_flipped() test uses this same threshold. */
+		vehicle->object.up.k < 0.2f ||
 		bots_distance2d(&tick->position, &vehicle->object.position) > 3.5f ||
 		fabs(tick->position.z - vehicle->object.position.z) > 2.5f)
 		return;
@@ -7029,10 +7031,17 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 	}
 	leader_vehicle = bots_unit_vehicle(leader);
 	own_vehicle = bots_unit_vehicle(tick.player->unit_index);
-	if (own_vehicle != NONE && own_vehicle != leader_vehicle)
+	if (own_vehicle != NONE)
 	{
-		/* The gunner leaves once the leader dismounts. */
-		unit_try_and_exit_seat(tick.player->unit_index);
+		struct object_datum *ridden = object_try_and_get(own_vehicle);
+		if (!ridden || own_vehicle != leader_vehicle || ridden->object.up.k < 0.2f)
+		{
+			/* A normal animated exit may fail while the Warthog is rolled
+			 * over. Detach only this AI companion so the human can flip it. */
+			unit_exit_seat_end(tick.player->unit_index);
+			platform_log("companion: left vehicle %ld (%s)", own_vehicle,
+				!ridden || ridden->object.up.k < 0.2f ? "overturned" : "leader dismounted");
+		}
 	}
 	if (own_vehicle == NONE)
 		bots_campaign_board(bot, &tick, leader_vehicle);
@@ -7042,7 +7051,9 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 		struct unit_datum *vehicle = unit_get(own_vehicle);
 		gunner = vehicle->unit.gunner_object_index == tick.player->unit_index;
 		tick.position = vehicle->object.position;
-		tick.weapon_index = gunner ? bots_current_weapon(vehicle) : NONE;
+		/* A gunner controls the Warthog turret; a passenger can fire the
+		 * weapon carried by their own Spartan. */
+		tick.weapon_index = gunner ? bots_current_weapon(vehicle) : bots_current_weapon(tick.unit);
 	}
 	else
 		tick.weapon_index = bots_current_weapon(tick.unit);
@@ -7092,8 +7103,7 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 		yaw_off = (real)fabs(bots_angle_difference((real)atan2(dy, dx), bot->yaw));
 		pitch_off = (real)fabs((real)atan2(dz, MAX(horizontal, 0.01f)) - bot->pitch);
 		cone = (real)atan(0.35f / MAX(distance, 0.5f)) * tick.skill->fire_cone + 0.01f;
-		if ((own_vehicle == NONE || gunner) &&
-			now - bot->target_first_seen_tick >= (long)(tick.skill->reaction_seconds * TICKS_PER_SECOND) &&
+		if (now - bot->target_first_seen_tick >= (long)(tick.skill->reaction_seconds * TICKS_PER_SECOND) &&
 			yaw_off < cone && pitch_off < cone * 1.5f &&
 			(gunner || (tick.weapon_index != NONE && !bots_weapon_empty(tick.weapon_index))))
 		{
@@ -7147,7 +7157,18 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 	else
 	{
 		bot->target_unit_index = NONE;
-		bot->yaw += BOTS_DEGREES * (own_vehicle != NONE ? 3.f : 0.5f);
+		if (own_vehicle != NONE)
+		{
+			/* With no visible target, return gently to the Warthog's
+			 * heading. The gunner still scans all directions for enemies
+			 * without constantly spinning the turret. */
+			struct object_datum *vehicle = object_get(own_vehicle);
+			real facing = (real)atan2(vehicle->object.forward.j, vehicle->object.forward.i);
+			bot->yaw += PIN(bots_angle_difference(facing, bot->yaw),
+				-2.f * BOTS_DEGREES, 2.f * BOTS_DEGREES);
+		}
+		else
+			bot->yaw += BOTS_DEGREES * 0.5f;
 		bot->pitch *= 0.98f;
 	}
 
@@ -7244,9 +7265,18 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 				bots_distance3d(bots_tick_eye(&tick),
 					&target->object.bounding_sphere_center));
 	}
-	/* A passenger cannot fire. A seated bot cannot walk or throw grenades. */
+	/* The gunner never reloads the vehicle's turret. A passenger, however,
+	 * needs the same reload and weapon-switch logic as an on-foot Spartan. */
 	if (own_vehicle != NONE && !gunner)
-		tick.flags &= ~FLAG(_unit_control_weapon_primary_trigger_bit);
+	{
+		bots_bot_weapons(bot, &tick);
+		if (target && bot->target_unit_index != NONE &&
+			!TEST_FLAG(target->object.damage_flags, _object_dead_bit) &&
+			now - bot->target_seen_tick < TICKS_PER_SECOND / 2)
+			bots_campaign_choose_weapon(bot, &tick, target,
+				bots_distance3d(bots_tick_eye(&tick),
+					&target->object.bounding_sphere_center));
+	}
 	if (tick.moving)
 	{
 		real relative = bots_angle_difference(tick.move_direction, bot->yaw);
