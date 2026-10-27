@@ -7328,6 +7328,105 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 	}
 }
 
+/* Halo 2-style weapon handoff for the local human and campaign companion.
+ * Hold the action/reload button (Vita Square by default) while looking
+ * directly at the nearby companion. This deliberately reuses Halo's
+ * sustained weapon-swap control, so a quick reload never offers a gun. */
+static void bots_campaign_weapon_trade(struct bots_bot *bot, long bot_index,
+	struct player_action *actions)
+{
+	static boolean trade_held[BOTS_MAXIMUM];
+	long bot_unit_index, leader, human_player_index, human_action_index;
+	long human_weapon, bot_weapon, returned_weapon;
+	struct unit_datum *human_unit;
+	struct object_datum *human, *companion;
+	struct player_action *human_action;
+	real dx, dy, dz, horizontal, desired_yaw, desired_pitch;
+	boolean received, returned;
+
+	if (bot_index < 0 || bot_index >= BOTS_MAXIMUM)
+		return;
+	bot_unit_index = player_get(bot->player_index)->unit_index;
+	leader = bots_campaign_leader(bot->player_index);
+	if (bot_unit_index == NONE || leader == NONE)
+	{
+		trade_held[bot_index] = FALSE;
+		return;
+	}
+	human_unit = unit_get(leader);
+	human_player_index = human_unit->unit.player_index;
+	if (human_player_index == NONE)
+		return;
+	human_action_index = DATUM_INDEX_TO_ABSOLUTE_INDEX(human_player_index);
+	if (human_action_index < 0 || human_action_index >= HALO_PORT_MAXIMUM_NETWORK_PLAYERS)
+		return;
+	human_action = &actions[human_action_index];
+	if (!TEST_FLAG(human_action->control_flags, _unit_control_swap_weapons_bit))
+	{
+		trade_held[bot_index] = FALSE;
+		return;
+	}
+	if (trade_held[bot_index])
+		return;
+	human = object_get(leader);
+	companion = object_get(bot_unit_index);
+	if (human->object.parent_object_index != NONE ||
+		companion->object.parent_object_index != NONE ||
+		TEST_FLAG(human->object.damage_flags, _object_dead_bit) ||
+		TEST_FLAG(companion->object.damage_flags, _object_dead_bit) ||
+		bots_distance3d(&human->object.position, &companion->object.position) > 2.5f)
+		return;
+
+	/* Avoid stealing an equipped gun just because the player is
+	 * reloading next to the bot: they must be facing the bot itself. */
+	dx = companion->object.bounding_sphere_center.x - human->object.bounding_sphere_center.x;
+	dy = companion->object.bounding_sphere_center.y - human->object.bounding_sphere_center.y;
+	dz = companion->object.bounding_sphere_center.z - human->object.bounding_sphere_center.z;
+	horizontal = (real)sqrt(dx * dx + dy * dy);
+	desired_yaw = (real)atan2(dy, dx);
+	desired_pitch = (real)atan2(dz, MAX(horizontal, 0.01f));
+	if (fabs(bots_angle_difference(desired_yaw, human_action->desired_facing.yaw)) > 0.35f ||
+		fabs(desired_pitch - human_action->desired_facing.pitch) > 0.4f)
+		return;
+
+	trade_held[bot_index] = TRUE;
+	human_weapon = bots_current_weapon(human_unit);
+	bot_weapon = bots_current_weapon(unit_get(bot_unit_index));
+	if (human_weapon == NONE || !weapon_can_be_fired(human_weapon) ||
+		!unit_can_use_weapon(bot_unit_index, human_weapon) ||
+		(bot_weapon == NONE && unit_get_weapon_count(bot_unit_index) >= 2))
+		return;
+	returned_weapon = bot_weapon != NONE && weapon_can_be_fired(bot_weapon) &&
+		unit_can_use_weapon(leader, bot_weapon) ? bot_weapon : NONE;
+
+	/* Each drop creates a free inventory slot before the paired pickup.
+	 * Check both drops, and restore the companion's gun if the player
+	 * could not release the offered weapon. Failed pickups stay in
+	 * the world as ordinary recoverable dropped weapons. */
+	if (bot_weapon != NONE && !unit_drop_current_weapon(bot_unit_index, TRUE))
+		return;
+	if (!unit_drop_current_weapon(leader, TRUE))
+	{
+		if (returned_weapon != NONE)
+			unit_add_weapon_to_inventory(bot_unit_index, returned_weapon, _unit_add_weapon_starting);
+		return;
+	}
+	received = unit_add_weapon_to_inventory(bot_unit_index, human_weapon, _unit_add_weapon_starting);
+	returned = returned_weapon == NONE ||
+		unit_add_weapon_to_inventory(leader, returned_weapon, _unit_add_weapon_starting);
+	if (!received)
+		unit_add_weapon_to_inventory(leader, human_weapon, _unit_add_weapon_starting);
+	if (received)
+	{
+		/* Prevent the ordinary pickup action from immediately changing
+		 * the newly received weapon during this same game tick. */
+		human_action->control_flags &= ~(FLAG(_unit_control_swap_weapons_bit) |
+			FLAG(_unit_control_action_bit));
+	}
+	platform_log("companion: weapon exchange offered %ld received %d returned %d",
+		human_weapon, (int)received, (int)returned);
+}
+
 static void bots_report(void)
 {
 	long now = game_time_get();
@@ -7478,7 +7577,10 @@ void bots_update_actions(struct player_action *actions)
 		if (absolute_index >= 0 && absolute_index < HALO_PORT_MAXIMUM_NETWORK_PLAYERS)
 		{
 			if (campaign_session)
+			{
 				bots_campaign_action(bot, bot_index, &actions[absolute_index]);
+				bots_campaign_weapon_trade(bot, bot_index, actions);
+			}
 			else
 				bots_bot_update(bot, bot_index, &actions[absolute_index]);
 		}
