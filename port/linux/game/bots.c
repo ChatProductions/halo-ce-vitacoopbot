@@ -634,6 +634,7 @@ struct bots_bot
 	long pause_until_tick;
 	long grenade_tick;
 	long melee_tick;
+	long campaign_weapon_decision_tick; /* avoids oscillating weapons */
 	long item_check_tick;
 
 	/* the buttons held last tick (a press is a tick held, then released) */
@@ -4103,7 +4104,7 @@ static boolean bots_campaign_scavenge(struct bots_bot *bot, struct unit_datum *u
 		return FALSE;
 	bot->item_check_tick = now + TICKS_PER_SECOND;
 	{
-		long item_index = bots_find_item(bot, unit, position, 18.0f, TRUE);
+		long item_index = bots_find_item(bot, unit, position, 36.0f, TRUE);
 
 		if (item_index != NONE)
 		{
@@ -6801,6 +6802,76 @@ static void bots_bot_update(struct bots_bot *bot, long bot_index, struct player_
  * This is an experimental network-co-op companion. It does not modify the
  * vanilla single-player save and does not simulate a second Vita.
  */
+/* Range and shield status change which weapon is useful. This score is
+only for campaign companions: ordinary multiplayer bot AI stays intact. */
+static real bots_campaign_weapon_score(long weapon_index, real range, boolean shielded)
+{
+	char const *name;
+	real score;
+
+	if (weapon_index == NONE || bots_weapon_empty(weapon_index))
+		return -1000.0f;
+	name = tag_get_name(weapon_get(weapon_index)->definition_index);
+	score = (real)bots_weapon_value(weapon_get(weapon_index)->definition_index);
+	if (!name)
+		return score;
+	if (strstr(name, "shotgun"))
+		score += range < 5.5f ? 10.f : range > 11.f ? -12.f : -3.f;
+	else if (strstr(name, "sniper"))
+		score += range > 17.f ? 11.f : range < 8.f ? -11.f : 2.f;
+	else if (strstr(name, "rocket") || strstr(name, "fuel rod"))
+		score += range > 8.f && range < 26.f ? 8.f : range < 6.f ? -14.f : -2.f;
+	else if (strstr(name, "pistol") && !strstr(name, "plasma"))
+		score += range >= 8.f ? 6.f : 1.f;
+	else if (strstr(name, "plasma rifle") || strstr(name, "plasma pistol"))
+		score += shielded ? 7.f : range < 10.f ? 3.f : -2.f;
+	else if (strstr(name, "needler"))
+		score += range >= 5.f && range <= 14.f ? 5.f : -3.f;
+	else if (strstr(name, "assault rifle"))
+		score += range >= 3.f && range <= 11.f ? 5.f : range > 18.f ? -10.f : 0.f;
+	else if (strstr(name, "flamethrower"))
+		score += range < 4.f ? 8.f : -10.f;
+	return score;
+}
+
+static void bots_campaign_choose_weapon(struct bots_bot *bot, struct bots_tick *tick,
+	struct object_datum const *enemy, real enemy_range)
+{
+	short slot, best_slot = NONE;
+	real best_score;
+	boolean shielded;
+
+	if (!enemy || tick->weapon_index == NONE ||
+		tick->now < bot->campaign_weapon_decision_tick)
+		return;
+	shielded = enemy->object.shield_vitality > 0.01f;
+	best_score = bots_campaign_weapon_score(tick->weapon_index, enemy_range, shielded);
+	for (slot = 0; slot < MAXIMUM_WEAPONS_PER_UNIT; slot++)
+	{
+		long candidate = tick->unit->unit.weapon_object_indices[slot];
+		real score;
+
+		if (candidate == NONE || slot == tick->unit->unit.current_weapon_index)
+			continue;
+		score = bots_campaign_weapon_score(candidate, enemy_range, shielded);
+		if (score > best_score + 3.0f)
+		{
+			best_score = score;
+			best_slot = slot;
+		}
+	}
+	if (best_slot != NONE)
+	{
+		tick->action->desired_weapon_index = best_slot;
+		tick->flags &= ~FLAG(_unit_control_weapon_primary_trigger_bit);
+		bot->campaign_weapon_decision_tick = tick->now + TICKS_PER_SECOND * 2;
+		platform_log("companion: tactical weapon change to slot %d at distance %.1f",
+			(int)best_slot, (double)enemy_range);
+	}
+	else
+		bot->campaign_weapon_decision_tick = tick->now + TICKS_PER_SECOND;
+}
+
 static long bots_campaign_leader(long companion_player_index)
 {
 	struct data_iterator iterator;
@@ -6945,6 +7016,8 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 		bot->item_first_press_tick = 0;
 		bot->previous_control_flags = 0;
 		bot->melee_tick = 0;
+		bot->grenade_tick = 0;
+		bot->campaign_weapon_decision_tick = 0;
 	}
 	leader = bots_campaign_leader(bot->player_index);
 	if (leader == NONE)
@@ -7039,12 +7112,36 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 		}
 		/* Use the same melee control as multiplayer bots. This is a
 		campaign actor, so bots_bot_fight() cannot be called here. */
-		if (own_vehicle == NONE && distance < 1.45f &&
-			yaw_off < 0.6f && now >= bot->melee_tick)
+		if (own_vehicle == NONE && distance < 1.7f &&
+			yaw_off < 0.75f && now >= bot->melee_tick)
 		{
 			tick.flags &= ~FLAG(_unit_control_weapon_primary_trigger_bit);
 			tick.flags |= FLAG(_unit_control_use_equipment_bit);
 			bot->melee_tick = now + TICKS_PER_SECOND;
+		}
+		/* Throw at medium range only when the human is well clear.
+		Grenades are a normal combat choice, not an empty-gun fallback. */
+		if (own_vehicle == NONE && distance > 7.f && distance < 19.f &&
+			now >= bot->grenade_tick &&
+			bots_distance3d(&object_get(leader)->object.position,
+				&target->object.position) > 8.f &&
+			now - bot->target_first_seen_tick >= TICKS_PER_SECOND &&
+			(tick.unit->unit.grenade_counts[0] > 0 || tick.unit->unit.grenade_counts[1] > 0))
+		{
+			short grenade = (short)tick.unit->unit.current_grenade_index;
+			if (grenade < 0 || grenade > 1 || tick.unit->unit.grenade_counts[grenade] <= 0)
+			{
+				action->desired_grenade_index = tick.unit->unit.grenade_counts[0] ? 0 : 1;
+				bot->grenade_tick = now + TICKS_PER_SECOND / 3;
+			}
+			else if (bots_random_real(bot) < tick.skill->grenade_chance / TICKS_PER_SECOND)
+			{
+				tick.flags &= ~FLAG(_unit_control_weapon_primary_trigger_bit);
+				tick.flags |= FLAG(_unit_control_throw_grenade_bit);
+				bot->grenade_tick = now + TICKS_PER_SECOND * 7;
+				platform_log("companion: grenade at enemy %ld range %.1f",
+					bot->target_unit_index, (double)distance);
+			}
 		}
 	}
 	else
@@ -7082,12 +7179,14 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 		/* With no ammunition and no reachable dropped weapon, fight at
 		melee range rather than tracking enemies from beside the player.
 		The target and companion must both stay close to the human. */
-		else if (leader_vehicle == NONE && !bots_campaign_has_ammo(tick.unit) &&
+		else if (leader_vehicle == NONE &&
 			target && bot->target_unit_index != NONE &&
 			!TEST_FLAG(target->object.damage_flags, _object_dead_bit) &&
 			now - bot->target_seen_tick < TICKS_PER_SECOND / 2 &&
-			bots_distance2d(&human->object.position, &target->object.position) < 6.f &&
-			bots_distance2d(&tick.position, &human->object.position) < 7.f)
+			bots_distance2d(&human->object.position, &target->object.position) < 7.f &&
+			bots_distance2d(&tick.position, &human->object.position) < 7.f &&
+			(!bots_campaign_has_ammo(tick.unit) ||
+			 bots_distance2d(&tick.position, &target->object.position) < 4.f))
 		{
 			goal = target->object.position;
 			melee_pursuit = TRUE;
@@ -7138,6 +7237,12 @@ static void bots_campaign_action(struct bots_bot *bot, long bot_index, struct pl
 		/* At a dropped weapon the normal pickup/swap input is generated.
 		Reload/switch decisions are applied independently of movement. */
 		bots_bot_weapons(bot, &tick);
+		if (target && bot->target_unit_index != NONE &&
+			!TEST_FLAG(target->object.damage_flags, _object_dead_bit) &&
+			now - bot->target_seen_tick < TICKS_PER_SECOND / 2)
+			bots_campaign_choose_weapon(bot, &tick, target,
+				bots_distance3d(bots_tick_eye(&tick),
+					&target->object.bounding_sphere_center));
 	}
 	/* A passenger cannot fire. A seated bot cannot walk or throw grenades. */
 	if (own_vehicle != NONE && !gunner)
