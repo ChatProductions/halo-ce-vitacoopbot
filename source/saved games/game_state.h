@@ -41,6 +41,9 @@ void game_state_revert(
 /* port: network co-op's (game_state.c) */
 boolean game_state_port_saved_game_valid(
 	void);
+/* Exclusive to a Vita-hosted campaign with exactly one human and one AI. */
+boolean game_state_port_companion_session(
+	void);
 void game_state_port_restamp_revert_time(
 	void);
 void game_state_save_to_persistent_storage(
