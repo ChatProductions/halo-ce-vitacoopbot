@@ -621,6 +621,35 @@ tab says another machine is in the group, one Vita
 creates a System Link game and the others find it in their lists. Ad hoc carries the game the way online play does,
 over the group instead of the internet; nothing goes to the internet.
 
+### Experimental campaign companion (this fork)
+
+On the `feat/campaign-companion-1_1-vita` branch, a local AI Spartan can join
+a one-human campaign through the network-co-op host. This is separate from
+regular multi-human network co-op, which retains its original behavior.
+
+- **Warthog:** The Spartan follows the human into the gunner seat first, or
+  the passenger seat if the gunner seat is occupied. It never takes the
+  driver's seat. While seated, it aims at Covenant targets and can fire the
+  turret (or its own weapon from a passenger seat). If the Warthog overturns,
+  the companion gets out; it will not board an overturned vehicle.
+- **Weapon exchange:** On foot, stand within 2.5 game units of the companion,
+  aim directly at it, then **hold Action/Reload** (Square with the default
+  Vita layout) until the weapon-swap control activates. Your equipped weapon
+  is offered in exchange for the bot's current one. Equip the sniper rifle
+  first if you want to hand it over. Releasing the button is required before
+  another exchange. The companion still selects its weapons according to
+  combat range and enemy shields, so it may later switch away from the sniper.
+- **Saving:** Experimental bot-co-op checkpoints are stored in the separate
+  `savegame_companion.bin` slot. Use Save & Quit after a real checkpoint,
+  and resume with the same mission, difficulty and profile. Keep backups
+  until restore behavior has been thoroughly tested on hardware.
+- **Logs:** Look at `ux0:data/haloce-vita/halo.log` for
+  `companion: boarded`, `companion: left vehicle`, and
+  `companion: weapon exchange` diagnostics.
+
+These behaviors compile on Vita but require device gameplay testing;
+ordinary online campaign sessions do not support this companion save slot.
+
 ## Languages
 
 The port's own text follows the settings panel's **Language** row (Audio
