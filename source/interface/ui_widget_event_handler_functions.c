@@ -2273,7 +2273,7 @@ static boolean pause_game_quit_to_main_menu(
 			if (game_state_port_saved_game_valid())
 				game_state_save_to_persistent_storage();
 			else
-				error(_error_silent, "coopbot Vita: quit without a checkpoint; progress cannot yet be saved");
+				error(2, "coopbot Vita: no valid checkpoint yet; no progress saved on exit");
 		}
 		for (controller_index = 0; controller_index < MAXIMUM_LOCAL_PLAYERS; controller_index++)
 			network_game_client_local_player_quit(controller_index);
