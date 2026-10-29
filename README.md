@@ -38,6 +38,10 @@ The companion has been reported working in both the **second** and **third** cam
 
 **No copyrighted Halo game files are bundled.** Consult the [original port's installation instructions](https://github.com/BirchWoodGod/halo-ce-vita#install) for the required game data and Vita prerequisites.
 
+## Contributing
+
+Want to improve the companion, report a bug, or help port it to 1.1.1? Read [CONTRIBUTING.md](CONTRIBUTING.md) for build steps, the test checklist, and guidance on submitting pull requests.
+
 ## Source, credits, and future updates
 
 - **`main` is this fork's primary source branch.** The [older companion development branch](https://github.com/ChatProductions/halo-ce-vitacoopbot/tree/feat/campaign-companion-1_1-vita) remains for history.
