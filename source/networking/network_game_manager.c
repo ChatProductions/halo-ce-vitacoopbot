@@ -96,6 +96,7 @@ symbols in this file:
 #include "text/unicode.h"
 #ifdef HALO_LINUX
 #include "bots.h"
+#include "saved games/game_state.h"
 #endif
 
 #include <xtl.h>
@@ -888,6 +889,13 @@ boolean network_game_create_game_objects(
 				break;
 			}
 		}
+#if defined(HALO_VITA)
+		/* Resume only after both players have occupied their network slots.
+		The existing game_state loader checks map, difficulty, checksum,
+		allocation layout and the serialized image before accepting it. */
+		if (game->local_data.game_objects_loaded && game_state_port_companion_session())
+			game_state_try_and_load_from_persistent_storage();
+#endif
 	}
 #ifdef HALO_LINUX
 	/* port: a custom map that cannot be loaded here (memory, a protected

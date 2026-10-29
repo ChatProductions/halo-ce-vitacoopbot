@@ -207,8 +207,9 @@ static boolean persistent_check_paths(
 
 	if (!game_state_get_persistent_storage_path(directory) || strlen(directory) > 200)
 		return FALSE;
-	sprintf(save_path, "%ssavegame.bin", directory);
-	sprintf(check_path, "%ssavegame.chk", directory);
+	sprintf(save_path, "%s%s", directory, game_state_get_persistent_storage_filename());
+	sprintf(check_path, "%s%s", directory,
+		game_state_port_companion_session() ? "savegame_companion.chk" : "savegame.chk");
 	if (!GetFileAttributesExA(save_path, GetFileExInfoStandard, &attributes))
 		return FALSE;
 	*file_size = attributes.nFileSizeLow;
@@ -810,7 +811,8 @@ void game_state_read_core(
 const char *game_state_get_persistent_storage_filename(
 	void)
 {
-	return "savegame.bin";
+	/* Network-hosted companion checkpoints never replace a solo save. */
+	return game_state_port_companion_session() ? "savegame_companion.bin" : "savegame.bin";
 }
 
 static __inline boolean game_state_get_persistent_storage_path(
@@ -845,8 +847,12 @@ static void delete_persistent_storage(
 #ifdef HALO_LINUX
 	game_state_persistent_storage_generation++;
 #endif
-	if (game_state_get_persistent_storage_path(path))
+	if (game_state_get_persistent_storage_path(path) &&
+		strlen(path) + strlen(game_state_get_persistent_storage_filename()) < sizeof(path))
+	{
+		strcat(path, game_state_get_persistent_storage_filename());
 		DeleteFileA(path);
+	}
 
 	return;
 }
@@ -870,7 +876,9 @@ static HANDLE game_state_open_persistent_storage(
 		{
 			game_state_get_persistent_storage_path(path);
 		}
-		strcat(path, "savegame.bin");
+		if (strlen(path) + strlen(directory ? "savegame.bin" : game_state_get_persistent_storage_filename()) >= sizeof(path))
+			return INVALID_HANDLE_VALUE;
+		strcat(path, directory ? "savegame.bin" : game_state_get_persistent_storage_filename());
 
 		file = CreateFileA(path, GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, 0,
 			NULL);

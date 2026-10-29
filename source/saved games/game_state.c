@@ -100,6 +100,8 @@ symbols in this file:
 #include "real_math.h"
 #include "console.h"
 #include "game_state.h"
+#include "bots.h" /* identifies a virtual companion */
+#include "network_coop.h" /* only authoritative host may save */
 #include "game.h"
 #include "tag_files.h"
 #include "cache_files.h"
@@ -509,27 +511,66 @@ void game_state_revert(
 	return;
 }
 
+/* One hosted Vita and its virtual Spartan may persist a checkpoint,
+not normal remote-player network co-op. It uses its own save file. */
+boolean game_state_port_companion_session(void)
+{
+#if defined(HALO_VITA)
+	struct data_iterator it;
+	struct player_datum *player;
+	long humans = 0, companions = 0;
+
+	if (!bots_campaign_enabled() || game_connection() != _game_connection_network_server ||
+		!network_coop_active() || !player_data)
+		return FALSE;
+	data_iterator_new(&it, player_data);
+	while ((player = (struct player_datum *)data_iterator_next(&it)) != NULL)
+	{
+		if (bots_machine_is_bot(player->network_player_data.machine_index))
+			companions++;
+		else if (player->local_player_index != NONE)
+			humans++;
+		else
+			return FALSE;
+	}
+	return humans == 1 && companions == 1;
+#else
+	return FALSE;
+#endif
+}
+
 void game_state_save_to_persistent_storage(
 	void)
 {
 #ifdef HALO_LINUX
 	/* port: the campaign save is the campaign's: a level not in it (a
 	Custom Edition campaign map's) is never saved in its place */
-	if (main_get_current_solo_level() == NONE)
+	if (main_get_current_solo_level() == NONE && !game_state_port_companion_session())
 	{
 		error(_error_silent, "save and quit: not a campaign level, not saved (the campaign save is kept)");
 		return;
 	}
 #endif
-	if (player_spawn_count==1)
+	if (player_spawn_count == 1 || game_state_port_companion_session())
 	{
 #ifdef HALO_LINUX
 		unsigned long long started;
+		boolean companion = game_state_port_companion_session();
+
+		if (companion && !game_state_globals.saved_game_valid)
+		{
+			platform_log("coopbot Vita save: no valid checkpoint; no progress to export");
+			return;
+		}
+		if (companion)
+			platform_log("coopbot Vita save: exporting latest checkpoint");
 
 #endif
 		game_state_note_event("save and quit");
 		game_state_revert();
 #ifdef HALO_LINUX
+		if (companion && !game_state_globals.saved_game_valid)
+			return;
 		started = halo_load_profile_now();
 #endif
 		game_state_write_to_persistent_storage(

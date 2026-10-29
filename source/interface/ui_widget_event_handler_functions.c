@@ -2265,6 +2265,16 @@ static boolean pause_game_quit_to_main_menu(
 	{
 		short controller_index;
 
+		/* In a Vita-hosted campaign containing one human and the virtual
+		companion, persist the most recent checkpoint before the host
+		leaves. Real network co-op still only leaves the lobby. */
+		if (game_state_port_companion_session())
+		{
+			if (game_state_port_saved_game_valid())
+				game_state_save_to_persistent_storage();
+			else
+				error(2, "coopbot Vita: no valid checkpoint yet; no progress saved on exit");
+		}
 		for (controller_index = 0; controller_index < MAXIMUM_LOCAL_PLAYERS; controller_index++)
 			network_game_client_local_player_quit(controller_index);
 		return TRUE;

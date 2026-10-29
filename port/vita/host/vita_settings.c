@@ -577,6 +577,8 @@ static struct setting settings[] = {
 	/* (network.coop_players: co-op games this Vita hosts take 2 players by
 	default, the Xbox's; 3 and 4 are experimental, the host running the
 	campaign's AI and scripts for everyone: network_server_manager.c) */
+	{ "Campaign companion", "HALO_BOT_CAMPAIGN", 0, 2, { "0", "1" }, { "Off", "Experimental" },
+		"Fill the second co-op slot with an AI ally; experimental, no Save and Quit", 0, TAB_MULTIPLAYER },
 	{ "Co-op players", "HALO_NET_COOP_PLAYERS", 0, 3, { "2", "3", "4" }, { "2", "3 (experimental)", "4 (experimental)" },
 		"Co-op you host. 3-4: your Vita may lag", 0, TAB_MULTIPLAYER },
 	/* (network.remote_lod, objects.c's objects_remote_lod_skipped: in a game

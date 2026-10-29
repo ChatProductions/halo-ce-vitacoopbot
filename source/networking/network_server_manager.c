@@ -3428,6 +3428,27 @@ boolean server_has_a_player_on_each_machine(
 	return TRUE;
 }
 
+/* An AI campaign companion is a virtual player, not a socket-connected
+ * machine. Let a solo Vita host begin a cooperative level with it. */
+#ifdef HALO_LINUX
+static boolean network_game_server_has_campaign_companion(struct network_game_server *server)
+{
+	long slot;
+
+	if (!bots_campaign_enabled() || network_game_is_splitscreen_local() ||
+		server->game.variant.game_engine_index != 0 ||
+		!custom_edition_maps_campaign_level(server->game.map.name))
+		return FALSE;
+	for (slot = 0; slot < MAXIMUM_NETWORK_PLAYER_COUNT; slot++)
+	{
+		struct network_player *player = &server->game.players[slot];
+		if (network_player_is_valid(player) && bots_machine_is_bot(player->machine_index))
+			return TRUE;
+	}
+	return FALSE;
+}
+#endif
+
 boolean server_has_enough_machines(
 	struct network_game_server *server)
 {
@@ -3451,6 +3472,11 @@ boolean server_has_enough_machines(
 	}
 
 	has_enough_machines = machine_count >= minimum_machine_count;
+#ifdef HALO_LINUX
+	if (!has_enough_machines && machine_count >= 1 &&
+		network_game_server_has_campaign_companion(server))
+		has_enough_machines = TRUE;
+#endif
 
 	return has_enough_machines;
 }
@@ -4176,7 +4202,11 @@ void network_game_server_update_countdown(
 				else
 				{
 					if (network_game_should_accept_remote_connections() == FALSE ||
-						network_game_server_get_client_machine_count(server) > 1)
+						network_game_server_get_client_machine_count(server) > 1
+#ifdef HALO_LINUX
+							|| network_game_server_has_campaign_companion(server)
+#endif
+							)
 					{
 						unsigned long countdown;
 
@@ -4729,6 +4759,8 @@ static void network_game_server_port_bots(
 	long slot_of_bot[BOTS_MAXIMUM];
 	long team_counts[NUMBER_OF_MULTIPLAYER_TEAMS] = { 0, 0 };
 	long human_team = NONE;
+	long human_count = 0;
+	boolean campaign_companion;
 	long wanted = 0;
 	long slot;
 	long bot_index;
@@ -4736,6 +4768,13 @@ static void network_game_server_port_bots(
 
 	if (server->state != _network_game_server_state_pregame || server->sent_start_game_message)
 		return;
+	/* Networked co-op has no multiplayer game engine. On Vita, a solo
+	 * co-op host may opt to fill its second player slot with a bot.
+	 * The bot is never inserted in normal internet or system-link games.
+	 * If another real player has joined the lobby, remove the bot. */
+	campaign_companion = !server->game.variant.game_engine_index &&
+		custom_edition_maps_campaign_level(server->game.map.name) &&
+		bots_campaign_enabled() && !network_game_is_splitscreen_local();
 	if (network_game_is_splitscreen_local())
 		wanted = PIN(bots_wanted_count(), 0, BOTS_MAXIMUM);
 	for (bot_index = 0; bot_index < BOTS_MAXIMUM; bot_index++)
@@ -4750,6 +4789,7 @@ static void network_game_server_port_bots(
 			slot_of_bot[player->machine_index - BOTS_FIRST_MACHINE] = slot;
 		else
 		{
+			human_count++;
 			if (VALID_INDEX(player->team_index, NUMBER_OF_MULTIPLAYER_TEAMS))
 			{
 				team_counts[player->team_index]++;
@@ -4758,8 +4798,13 @@ static void network_game_server_port_bots(
 			}
 		}
 	}
-	/* (no bots before a player is in: the lobby's own first player) */
-	if (human_team == NONE)
+	/* One human + one companion in a campaign lobby; a second human
+	 * replaces the companion, without changing multiplayer bot behavior. */
+	if (campaign_companion && human_count == 1)
+		wanted = 1;
+	/* Campaign co-op is not a team game: its human player can have
+	 * team_index == NONE. Do not suppress the companion in that case. */
+	if (human_team == NONE && !campaign_companion)
 		wanted = 0;
 
 	/* those not wanted leave (the last first) */
@@ -4784,7 +4829,9 @@ static void network_game_server_port_bots(
 		struct network_player *player;
 		long team_index;
 
-		if (bots_teams() == _bots_teams_against)
+		if (campaign_companion)
+			team_index = human_team != NONE ? human_team : 0;
+		else if (bots_teams() == _bots_teams_against)
 			team_index = human_team == 0 ? 1 : 0;
 		else
 			team_index = team_counts[1] < team_counts[0] ? 1 : 0;
@@ -4800,7 +4847,12 @@ static void network_game_server_port_bots(
 			get_unique_random_color(server, &joining);
 			joining.player_list_index = NONE;
 			if (!network_game_add_player(&server->game, &joining))
+			{
+				network_event("bots: could not add %s to lobby (players %d/%d, team %ld, machine %d)",
+					campaign_companion ? "campaign companion" : "bot", server->game.player_count,
+					server->game.maximum_players, team_index, joining.machine_index);
 				break;
+			}
 			network_event("bots: bot %ld joined the lobby (team %ld)", bot_index + 1, team_index);
 			changed = TRUE;
 		}
