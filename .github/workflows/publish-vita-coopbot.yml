@@ -1,0 +1,84 @@
+name: Publish Halo CE Vita companion preview
+
+# One-time publication of the validated CI build from commit 11baa666.
+# This workflow runs only when its own file is introduced or changed.
+on:
+  push:
+    branches:
+      - feat/campaign-companion-1_1-vita
+    paths:
+      - .github/workflows/publish-vita-coopbot.yml
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Publish experimental companion VPK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BODY: |
+            ## Halo CE Vita Companion v0.1.0
+
+            An **experimental community fork** of Halo CE Vita, built from the
+            1.1.0-era codebase. **This is not the upstream 1.1.1 update.**
+            Built from `11baa666416672a10797fcd541631daeffe11a2f`.
+
+            ### Features
+            - One AI Spartan squadmate in local campaign co-op, with follow,
+              combat, reload, melee, grenade, scavenging and tactical weapon
+              selection logic.
+            - Warthog gunner support (confirmed to fire in gameplay).
+              Automatic gunner/passenger boarding; no driving.
+            - Recent Warthog fixes: stop endless idle turret rotation,
+              leave or refuse an overturned Warthog, and attempt to fire
+              the companion's own weapon from the passenger seat.
+            - Manual weapon exchange: on foot, aim at the nearby companion
+              and hold Action/Reload (default Vita Square) to trade equipped
+              weapons. Works with any compatible weapon, not just snipers.
+            - Experimental persistent Save & Quit/Resume via the separate
+              `savegame_companion.bin` slot, leaving normal solo saves alone.
+
+            ### What remains experimental
+            - The Spartan's walking-leg animation may slide without animating.
+            - Passenger-seat firing, weapon exchange and the newest Warthog
+              fixes need further testing on actual PS Vita hardware.
+            - Save restoration was reported working in a previous gameplay
+              test, but retain backups before upgrading or changing versions.
+            - This build is **not network-compatible with upstream 1.1.1**.
+
+            ### Install
+            Install the attached `halo-ce-vita-coopbot-v0.1.0.vpk` with
+            VitaShell. It replaces the Halo CE bubble's executable
+            (title ID `HCEV00001`). Your existing game-data folder is
+            `ux0:data/haloce-vita/`. Back up saves before switching builds.
+            Requires game maps from your legally owned Xbox Halo CE copy;
+            **no copyrighted game files are included**.
+
+            ### Credits
+            Based on [BirchWoodGod/halo-ce-vita](https://github.com/BirchWoodGod/halo-ce-vita).
+            Companion changes developed in
+            [ChatProductions/halo-ce-vitacoopbot](https://github.com/ChatProductions/halo-ce-vitacoopbot).
+            See the source and GPL-3.0 license for notices.
+        run: |
+          set -euo pipefail
+          TAG="vita-coopbot-v0.1.0"
+          BASE_SHA="11baa666416672a10797fcd541631daeffe11a2f"
+          STAGING="$RUNNER_TEMP/coopbot-vita-release"
+          mkdir -p "$STAGING"
+          gh run download 40561756105 --repo "$GITHUB_REPOSITORY" --name haloce-vita-companion-test --dir "$STAGING"
+          VPK_SOURCE="$(find "$STAGING" -type f -name halo.vpk -print -quit)"
+          test -n "$VPK_SOURCE"
+          cp "$VPK_SOURCE" "$STAGING/halo-ce-vita-coopbot-v0.1.0.vpk"
+          cd "$STAGING"
+          sha256sum halo-ce-vita-coopbot-v0.1.0.vpk > SHA256SUMS.txt
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" halo-ce-vita-coopbot-v0.1.0.vpk SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --title "Halo CE Vita Companion v0.1.0 (experimental, base 1.1.0)" --notes "$RELEASE_BODY" --prerelease --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" halo-ce-vita-coopbot-v0.1.0.vpk SHA256SUMS.txt --target "$BASE_SHA" --title "Halo CE Vita Companion v0.1.0 (experimental, base 1.1.0)" --notes "$RELEASE_BODY" --prerelease --repo "$GITHUB_REPOSITORY"
+          fi
