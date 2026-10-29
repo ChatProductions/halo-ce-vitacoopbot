@@ -1,3 +1,28 @@
+# Halo CE Vita: AI Companion Fork
+
+> **Unofficial experimental community fork** of [BirchWoodGod's Halo CE Vita](https://github.com/BirchWoodGod/halo-ce-vita). This companion preview is based on the **1.1.0-era code**, **not** the original developer's newer 1.1.1 release.
+
+**[Download the Companion VPK (v0.1.0)](https://github.com/ChatProductions/halo-ce-vitacoopbot/releases/tag/vita-coopbot-v0.1.0)** · [Companion source branch](https://github.com/ChatProductions/halo-ce-vitacoopbot/tree/feat/campaign-companion-1_1-vita) · [Original developer's project](https://github.com/BirchWoodGod/halo-ce-vita)
+
+## What's in this companion preview?
+
+- **One AI Spartan squadmate** to accompany you through the campaign: following, fighting enemies, reloading, melee attacks, grenades, and experimental ammo scavenging and tactical weapon selection.
+- **Warthog support:** automatic boarding as gunner (turret firing confirmed in gameplay) or passenger. The companion does **not** drive.
+- **Warthog fixes under test:** settle the turret when idle, avoid boarding overturned vehicles, dismount if the Warthog flips, and attempt passenger-seat firing.
+- **Experimental Save & Quit/Resume:** a separate `savegame_companion.bin` slot. A prior gameplay test reported successful saving and resuming.
+
+### Current limitations
+
+This is a **prerelease**. The companion's walking legs may slide instead of animating; passenger-seat shooting and the newer vehicle fixes need more hardware testing. Keep a backup of your saves before replacing another build. The preview is **not network-compatible with upstream v1.1.1**.
+
+Install the VPK using VitaShell. It replaces the executable for title ID `HCEV00001`, but normally leaves the data in `ux0:data/haloce-vita/` intact. You must supply files from your own legally obtained Xbox copy of Halo CE; **no copyrighted game assets are included**.
+
+The **companion implementation is on this feature branch**, while the repository's default `main` branch is based on upstream. The original port's README is reproduced below for reference; its version badges, download buttons, and installation instructions refer to **BirchWoodGod's upstream releases**, not our companion build.
+
+---
+
+## Original Halo CE Vita documentation (upstream)
+
 <div align="center">
 
 <img src="docs/logo.png" alt="Halo CE for PS Vita logo: a PS Vita with the Halo ring on its screen" width="160">
