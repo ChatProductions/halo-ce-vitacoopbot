@@ -1,11 +1,14 @@
 name: Vita companion test build
 
-# This is experimental and does not publish a release. The bot and
-# saved-game behavior need real-hardware validation before distribution.
+# CI compilation only: not a release and not a substitute for Vita hardware tests.
+# Validate the canonical branch and incoming pull requests automatically.
 on:
   push:
     branches:
-      - feat/campaign-companion-1_1-vita
+      - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
